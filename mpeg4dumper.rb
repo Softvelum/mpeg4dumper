@@ -80,6 +80,7 @@ class IsoBaseMediaFile
       return buffer
     end
 
+
     def skipNBytes bytes2skip
       if @size > @offset + bytes2skip
         @file.seek(bytes2skip, IO::SEEK_CUR)
@@ -153,6 +154,14 @@ class IsoBaseMediaFile
 
       raise InvalidFileException if @size != @offset
     end
+
+    def is_major_brand_qt
+      @major_brand == 'qt  '
+    end
+
+    def is_gt_in_compatible_brands
+      @compatible_brands.include?('qt  ')
+    end
   end
 
   class MovieHeaderBox < FullBox
@@ -194,11 +203,11 @@ class IsoBaseMediaFile
       end
 
       skipNBytes(8 + # const unsigned int(32)[2] reserved = 0;
-                 2 + # template int(16) layer = 0;
-                 2 + # template int(16) alternate_group = 0
-                 2 + # template int(16) volume = {if track_is_audio 0x0100 else 0};
-                 2 + # const unsigned int(16) reserved = 0;
-                 9 * 4  # template int(32)[9] matrix= { 0x00010000,0,0,0,0x00010000,0,0,0,0x40000000 };
+                     2 + # template int(16) layer = 0;
+                     2 + # template int(16) alternate_group = 0
+                     2 + # template int(16) volume = {if track_is_audio 0x0100 else 0};
+                     2 + # const unsigned int(16) reserved = 0;
+                     9 * 4  # template int(32)[9] matrix= { 0x00010000,0,0,0,0x00010000,0,0,0,0x40000000 };
       )
 
       # width and height are 16.16 values
@@ -319,11 +328,11 @@ class IsoBaseMediaFile
     end
 
   end
-
   class VisualSampleEntry < SampleEntry
     attr_accessor :width, :height, :compressorname
 
     def load
+      raise "wrong coding name. only avc1 supoprted" unless codingname == 'avc1'
       pre_defined = getInt16
       reserved = getInt16
       pre_defined = getInt32Array(3)
@@ -339,6 +348,7 @@ class IsoBaseMediaFile
       pre_defined = getInt16
 
       # lets get avcC params
+      # box size  box type
       raise "wrong avc1 container" unless @size > @offset + 4         + 4
       parent.avcC =  box = AvcC.new(self, @file)
       box.load
@@ -348,15 +358,166 @@ class IsoBaseMediaFile
     end
   end
 
+  class EsdsBox < Box
+    attr_accessor :object_type, :sample_rate, :sample_rate_index, :chan_config
+    MP4ESDESCRTAG = 0x03
+    MP4DECCONFIGDESCRTAG = 0x04
+    MP4DECSPECIFICDESCRTAG = 0x5
+    AVPRIV_MPEG4AUDIO_SAMPLE_RATES =[96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+    FF_MPEG4AUDIO_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 8]
+
+    def load
+      @object_type = @sample_rate = @sample_rate_index = @chan_config = 0
+      getInt32 # version + flags
+      tag,len = mp4_read_descr
+
+      if tag == MP4ESDESCRTAG
+        mp4_parse_es_descr()
+      else
+        getInt16 # ID
+      end
+      tag, len = mp4_read_descr
+      if tag == MP4DECCONFIGDESCRTAG
+        mp4_read_dec_config_descr
+      end
+      skipBox
+    end
+
+    private
+
+    def mp4_read_dec_config_descr
+      object_type_id = getInt8
+      getInt8   # stream type
+      getInt24 # buffer size db
+      getInt32 # max bitrate
+      getInt32 # avg bitrate
+
+      tag, len = mp4_read_descr()
+
+      if tag == MP4DECSPECIFICDESCRTAG
+        @object_type, @sample_rate, @sample_rate_index, @chan_config  = mpeg4audio_get_config()
+      end
+
+    end
+
+    def mpeg4audio_get_config
+      #@object_type, @sample_rate, @chan_config
+      first_byte = getInt8()
+      second_byte = getInt8()
+      object_type = (first_byte & 0xF8) >> 3 # get object_type. object_id is 5 higher bits of byte so lets cut 3 lower bits
+
+      sample_rate_index = ((first_byte & 0x7) << 1) + (second_byte >> 7)
+      sample_rate =  sample_rate_index == 0x0f ? getInt24() : AVPRIV_MPEG4AUDIO_SAMPLE_RATES[sample_rate_index]
+      chan_config = (second_byte >> 3) & 0xF
+      if (chan_config < FF_MPEG4AUDIO_CHANNELS.size)
+        chan_config = FF_MPEG4AUDIO_CHANNELS[chan_config]
+      end
+
+      return object_type, sample_rate, sample_rate_index, chan_config
+    end
+
+    def mp4_read_descr
+      #   tag,     len
+      return getInt8(), mp4_read_descr_len()
+    end
+
+    def mp4_read_descr_len
+      len = 0
+      count = 4
+      while (count = count-1)>=0  do
+        c = getInt8
+        len = (len << 7) | (c & 0x7f)
+        break if (0x00 == (c & 0x80))
+      end
+      return len
+    end
+
+    def mp4_parse_es_descr
+      es_id = getInt16 # es_id
+      flags = getInt8
+      if (flags & 0x80) != 0 # streamDependenceFlag
+        getInt16
+      end
+
+      if (flags & 0x40) != 0 # URL_Flag
+        len = getInt8
+        skipNBytes(len)
+      end
+
+      if (flags & 0x20) != 0 # OCRstreamFlag
+        getInt16
+      end
+    end
+  end
+
+  class ItunesWaveBox < Box
+    attr_accessor :esds
+    def load
+      while @size > @offset && !@file.eof?
+        box = Box.new(self, file)
+        if 'esds' == box.type
+          @esds = box = EsdsBox.new(self, box)
+        end
+        box.load
+        @offset+= box.size
+      end
+      skipBox
+    end
+  end
   class AudioSampleEntry < SampleEntry
     attr_accessor :channelcount, :samplesize, :samplerate
     def load
-      reserved = getInt32Array(2)
+      raise "wrong coding name. only mp4a supoprted" unless codingname == 'mp4a'
+      version = getInt16
+      getInt16 # revision level
+      getInt32 # vendor
+
       @channelcount = getInt16
       @samplesize = getInt16
       pre_defined = getInt16
       reserved = getInt16
-      @samplerate = getInt32
+      @samplerate = getInt32  >> 16
+      moov = parent.parent.parent.parent.parent.parent
+      ftyp = moov.ftyp
+
+      if ftyp.is_major_brand_qt || ftyp.is_gt_in_compatible_brands
+        if version == 1
+          @samples_per_frame = getInt32
+          @bytes_per_packet = getInt32 # bytes per packet
+          @bytes_per_frame = getInt32
+          @bytes_per_sample = getInt32
+        elsif version == 2
+          getInt32 # sizeof struct only
+          @sample_rate = getInt64
+          @channelcount = avio_rb32(pb);
+          raise "wrong v2 format" unless getInt32() == 0x7F000000
+          @bits_per_coded_sample = getInt32 # bits per channel if sound is uncompressed */
+          getInt32 # lpcm format specific flag
+          @bytes_per_frame = getInt32 # bytes per audio packet if constant
+          @samples_per_frame = getInt32 # lpcm frames per audio packet if constant
+
+        end
+
+      end
+
+      raise "wrong mp4 container" unless @size > @offset + 4         + 4
+      esds_pretender = Box.new(self, @file)
+
+      if esds_pretender.type == 'wave'
+        wave = ItunesWaveBox.new self, esds_pretender
+        wave.load
+        @offset+= wave.size
+        esds = wave.esds
+
+      elsif esds_pretender.type == 'esds'
+        esds = EsdsBox.new(self, esds_pretender)
+        esds.load
+        @offset+= esds.size
+      else
+        raise "wrong mp4a container. cannot find neither wave nor esds"
+      end
+      parent.esds = esds
+               # process esds
       skipBox
     end
   end
@@ -403,17 +564,17 @@ class IsoBaseMediaFile
 
   # 'stsd'
   class SampleDescriptionBox < FullBox
-    attr_accessor :vide, :soun, :avcC
+    attr_accessor :vide, :soun, :avcC, :esds
 
     def load
-                    #stbl  ->minf ->mdia ->trak
+      #stbl  ->minf ->mdia ->trak
       handler_type = parent.parent.parent.handler.handler_type
       entry_count = getInt32()
       raise InvalidFileException if entry_count != 1
       if handler_type == 'vide'
         @vide = box = VisualSampleEntry.new self, @file
       else  handler_type == 'soun'
-        @soun = box = AudioSampleEntry.new self, @file
+      @soun = box = AudioSampleEntry.new self, @file
       end
       box.load
       @offset+= box.size
@@ -428,7 +589,7 @@ class IsoBaseMediaFile
       entry_count = getInt32
       @sample_info = []
       entry_count.times do
-                        # first_chunk            samples_per_chunk  sample_description_index
+        # first_chunk            samples_per_chunk  sample_description_index
         @sample_info << [getInt32,               getInt32,          getInt32]
       end
       skipBox
@@ -573,35 +734,59 @@ class IsoBaseMediaFile
 
   # moov
   class MovieBox < Box
-   attr_accessor :mvhd, :traks
+    attr_accessor :mvhd, :traks, :ftyp
 
-   def load
-     @mvhd = nil
-     @traks = []
-     while @size > @offset && !@file.eof?
-       box = Box.new(self, file)
-       if 'mvhd' == box.type
-         @mvhd = box =  MovieHeaderBox.new(self, box)
-       elsif 'trak' == box.type
-         @traks << box = TrackBox.new(self, box)
-       end
+    def initialize parent, arg, ftyp
+      super parent, arg
+      @ftyp = ftyp
+    end
 
-       box.load
-       @offset+= box.size
-     end
-     skipBox
-   end
+    def load
+      @mvhd = nil
+      @traks = []
+      while @size > @offset && !@file.eof?
+        box = Box.new(self, file)
+        if 'mvhd' == box.type
+          @mvhd = box =  MovieHeaderBox.new(self, box)
+        elsif 'trak' == box.type
+          @traks << box = TrackBox.new(self, box)
+        end
+
+        box.load
+        @offset+= box.size
+      end
+      skipBox
+    end
   end
 
   def load fileName
     File.open fileName, 'rb' do |file|
+      # let find ftype first
+      first_box = true
+      @fileType = nil
+
       while not file.eof? do
         box = Box.new(self, file)
-
         if 'ftyp' == box.type
-          box = @fileType = FileTypeBox.new(self, box)
-        elsif 'moov' == box.type
-          box = @movieBox = MovieBox.new(self, box)
+          box = @fileType = FileTypeBox.new(nil, box)
+        end
+        box.load
+
+        break if @fileType
+        first_box = false
+      end
+
+      raise "was not able to find ftyp" unless @fileType
+
+      unless first_box and @fileType
+        # lets begin from
+        file.seek(0, IO::SEEK_SET)
+      end
+
+      while not file.eof? do
+        box = Box.new(self, file)
+        if 'moov' == box.type
+          box = @movieBox = MovieBox.new(nil, box, @fileType)
         end
         box.load
       end
@@ -610,45 +795,43 @@ class IsoBaseMediaFile
 
   attr_accessor :fileType, :movieBox
 
-end
-
-
-def getMediaInfo(mediaFile)
-  p "Movie Info creation_time= #{mediaFile.movieBox.mvhd.creation_time}"\
+  def self.getMediaInfo(mediaFile)
+    p "Movie Info creation_time= #{mediaFile.movieBox.mvhd.creation_time}"\
   ",modification time=#{mediaFile.movieBox.mvhd.modification_time}"\
   ",timescale=#{mediaFile.movieBox.mvhd.timescale}"\
   ",duration=#{mediaFile.movieBox.mvhd.duration}"
 
-  mediaFile.movieBox.traks.each do |trak|
-    p "Trak info Id=#{trak.tkhd.track_ID}"\
+    mediaFile.movieBox.traks.each do |trak|
+      p "Trak info Id=#{trak.tkhd.track_ID}"\
     ",duration=#{trak.tkhd.duration}"\
     ",width=#{trak.tkhd.width}"\
     ",height=#{trak.tkhd.height}"
-    p "Media Header box. lang=#{trak.mdia.mdhd.lang}"
-    p "Media Handler box.handler_type=#{trak.mdia.handler.handler_type}"
-    next unless trak.mdia.handler.handler_type == 'vide' or trak.mdia.handler.handler_type == 'soun'
+      p "Media Header box. lang=#{trak.mdia.mdhd.lang}"
+      p "Media Handler box.handler_type=#{trak.mdia.handler.handler_type}"
+      next unless trak.mdia.handler.handler_type == 'vide' or trak.mdia.handler.handler_type == 'soun'
 
-    stbl = trak.mdia.minf.stbl
-    if stbl.stsd.vide
-      p "Sample description box width=#{stbl.stsd.vide.width}"\
+      stbl = trak.mdia.minf.stbl
+      if stbl.stsd.vide
+        p "Sample description box width=#{stbl.stsd.vide.width}"\
     ",height=#{stbl.stsd.vide.height}"\
     ",compressorname=#{stbl.stsd.vide.compressorname}"
-    elsif stbl.stsd.soun
-      p "Sample description channelcount=#{stbl.stsd.soun.channelcount}"\
+      elsif stbl.stsd.soun
+        p "Sample description channelcount=#{stbl.stsd.soun.channelcount}"\
     ",samplesize=#{stbl.stsd.soun.samplesize}"\
     ",samplerate=#{stbl.stsd.soun.samplerate}"
+      end
+      p "------------------------------------------------"
     end
-    p "------------------------------------------------"
+
+
   end
-
-
 end
 
 p "wrong parameter count. add mp4 file and output directory" and exit if ARGV.length == 0 or ARGV.length > 2
 mediaFile = IsoBaseMediaFile.new
 mediaFile.load(ARGV[0])
 
-getMediaInfo(mediaFile)
+IsoBaseMediaFile.getMediaInfo(mediaFile)
 
 if ARGV[1]
   Dir.mkdir ARGV[1] unless Dir.exist? ARGV[1]

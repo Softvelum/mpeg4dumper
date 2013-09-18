@@ -10,6 +10,6 @@ mpeg4dumper is a tool that takes samples from MP4 tracks.
 
 
 
-This script is released under GPLv3 license: http://www.gnu.org/licenses/gpl.html
+This product is released under MIT license.
 
 Please also take a look at our Nimble HTTP Streamer, the HTTP streaming server: https://wmspanel.com/nimble
