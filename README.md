@@ -12,5 +12,5 @@ mpeg4dumper is a tool that takes samples from MP4 tracks.
 
 This product is released under MIT license.
 
-Please also take a look at our Nimble HTTP Streamer, the HTTP streaming server: https://wmspanel.com/nimble 
-It's capable of MP4 transmuxing to HLS in VOD mode.
+Please also take a look at our Nimble HTTP Streamer: https://wmspanel.com/nimble
+It's the HTTP streaming server capable of MP4 transmuxing to VOD HLS, UDP MPEG-TS to ABR HLS generation and also re-streaming HLS as edge server.
