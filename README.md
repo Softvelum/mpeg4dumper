@@ -8,8 +8,8 @@ mpeg4dumper is a tool that takes samples from MP4 tracks.
 - sample.mp4 - file to analyse
 - output - output directory name
 
-Please also take a look at Nimble Streamer: https://wmspanel.com/nimble
+Please also take a look at Nimble Streamer: https://softvelum.com/nimble/
 
-It's a software media server capable of live and VOD streaming over various protocols. You can check all of its VOD features here: https://wmspanel.com/nimble/vod_streaming
+It's a software media server capable of live and VOD streaming over various protocols. You can check all of its VOD features here: https://softvelum.com/nimble/vod_streaming/
 
 This product is released under MIT license.
